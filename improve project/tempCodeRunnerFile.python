@@ -1,0 +1,62 @@
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import StreamingResponse
+import cv2, numpy as np
+from ultralytics import YOLO
+from collections import Counter
+import io
+
+app = FastAPI()
+
+# ===== MODEL =====
+model = YOLO("yolov8n.pt")
+BASIC_OBJECTS=['person','car','truck','bus','motorcycle','bicycle','traffic light','stop sign']
+
+REAL_HEIGHTS={'person':1.7,'bicycle':1.2,'car':1.5,'motorcycle':1.1,'bus':3.0,'truck':3.5,'traffic light':3.0,'stop sign':2.5}
+FOCAL_LENGTH=600
+
+def estimate_distance(h,label):
+    if label not in REAL_HEIGHTS or h<=0:return None
+    return round((REAL_HEIGHTS[label]*FOCAL_LENGTH)/h,2)
+
+# ⭐ YOUR DETECTION FUNCTION (converted)
+def detect(frame):
+    results=model(frame,conf=0.4,verbose=False)
+    annotated=frame.copy()
+    names=results[0].names
+
+    for box in results[0].boxes:
+        cls=int(box.cls[0])
+        label=names[cls]
+        if label not in BASIC_OBJECTS: continue
+
+        x1,y1,x2,y2=map(int,box.xyxy[0])
+        conf=float(box.conf[0])
+
+        h=y2-y1
+        dist=estimate_distance(h,label)
+
+        color=(255,0,0)
+        if dist and dist<5:
+            color=(0,0,255)
+
+        cv2.rectangle(annotated,(x1,y1),(x2,y2),color,3)
+
+        if dist:
+            text=f"{label} {dist}m"
+        else:
+            text=f"{label} {conf:.2f}"
+
+        cv2.putText(annotated,text,(x1,y1-10),cv2.FONT_HERSHEY_SIMPLEX,0.6,color,2)
+
+    return annotated
+
+@app.post("/detect")
+async def detect_api(file: UploadFile = File(...)):
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+    result = detect(frame)
+
+    _, img_encoded = cv2.imencode(".jpg", result)
+    return StreamingResponse(io.BytesIO(img_encoded.tobytes()), media_type="image/jpeg")
